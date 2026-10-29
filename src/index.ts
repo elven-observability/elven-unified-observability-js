@@ -2,9 +2,9 @@ import { destroy as destroyLogger, ILogger, init as initLogger, logger } from 'e
 import {
   initObservability,
   MetricFacade,
-  metrics,
+  metrics as sdkMetrics,
   type ObservabilityHandle,
-  tracer,
+  tracer as sdkTracer,
   TracerFacade,
 } from 'elven-opentelemetry-instrumentation-js';
 import {
@@ -21,9 +21,10 @@ import {
 // Re-export types
 export * from './types';
 
-// Re-export compiled singletons
+// Public facades follow the wrapper handle, including disabled fallbacks.
 export { logger } from 'elven-logs-interceptor';
-export { metrics, tracer } from 'elven-opentelemetry-instrumentation-js';
+export let tracer: TracerFacade = sdkTracer;
+export let metrics: MetricFacade = sdkMetrics;
 
 // Re-export type definitions for usage
 export { ILogger, MetricFacade, TracerFacade };
@@ -313,10 +314,12 @@ function createUnifiedHandle(): UnifiedObservabilityHandle {
     fallbackTracer ??= new TracerFacade('elven-unified-fallback');
     fallbackMetrics ??= new MetricFacade('elven-unified-fallback');
   }
+  tracer = telemetryHandle?.tracer ?? fallbackTracer!;
+  metrics = telemetryHandle?.metrics ?? fallbackMetrics!;
   return {
     logger: activeLogger,
-    tracer: telemetryHandle?.tracer ?? fallbackTracer!,
-    metrics: telemetryHandle?.metrics ?? fallbackMetrics!,
+    tracer,
+    metrics,
     forceFlush,
     shutdown,
     isStarted: isInitialized,

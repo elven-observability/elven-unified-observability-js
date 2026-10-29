@@ -194,7 +194,8 @@ await observability.shutdown();
 
 `failOpen` defaults to `true`: a logger or telemetry startup failure is exposed
 in the returned status without stopping the application. Set it to `false` for
-strict startup, which cleans up successful components before rejecting. Signal
+strict startup, which attempts bounded cleanup before rejecting; unfinished
+cleanup remains fenced against replacement initialization. Signal
 cleanup never calls `process.exit(0)`; explicit application exit codes and the
 default SIGINT/SIGTERM lifecycle are preserved.
 
@@ -237,3 +238,18 @@ fixture and cover failure, deadlines, late cleanup, signal ownership and
 disabled preload. They do not qualify every database/framework, native runtime,
 customer collector or long-duration memory/CPU budget. A registry audit with
 findings remains a release gate even when unit tests pass.
+
+For maintainers testing unpublished dependencies from the source checkout:
+
+```sh
+npm run validate:candidate -- \
+  --sdk-archive "$SDK_ARCHIVE" --sdk-sha256 "$SDK_SHA256" \
+  --logs-archive "$LOGS_ARCHIVE" --logs-sha256 "$LOGS_SHA256"
+```
+
+Use absolute archive paths and independently reviewed SHA-256 digests. The
+runner creates a separate private staging tree, verifies both archives,
+replays its lockfile, audits the resolved runtime graph and runs real collector
+and packed-consumer tests. Its local-archive lock is deliberately rejected by
+the public release gate. Passing this integration is not public dependency
+availability, performance approval or authorization to publish that tarball.

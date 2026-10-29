@@ -303,11 +303,19 @@ test('package metadata and lockfile are coherent', () => {
   assert.equal(lock.packages[''].version, manifest.version);
   assert.deepEqual(lock.packages[''].dependencies, manifest.dependencies);
   assert.deepEqual(lock.packages[''].devDependencies, manifest.devDependencies);
-  for (const [name, range] of Object.entries(manifest.dependencies)) {
+  const statePath = path.join(packageRoot, 'candidate-state.json');
+  const state = fs.existsSync(statePath) ? JSON.parse(fs.readFileSync(statePath, 'utf8')) : null;
+  for (const [name, range] of Object.entries(state?.publicDependencies || manifest.dependencies)) {
     assert.ok(semver.satisfies(lock.packages[`node_modules/${name}`].version, range));
     assert.equal(semver.prerelease(lock.packages[`node_modules/${name}`].version), null);
   }
-  assert.equal(require('../scripts/verify-public-lock.cjs').verify().status, 'verified-public-registry');
+  const verify = require('../scripts/verify-public-lock.cjs').verify;
+  if (state?.publicLockStatus === 'candidate-local-only') {
+    assert.equal(manifest.private, true);
+    assert.throws(() => verify(), /Publication blocked/);
+  } else {
+    assert.equal(verify().status, 'verified-public-registry');
+  }
   assert.equal(manifest.publishConfig.access, 'public');
   assert.equal(manifest.sideEffects.includes('./dist/register.js'), true);
   assert.equal(manifest.repository.url, 'git+https://github.com/elven-observability/elven-unified-observability-js.git');
@@ -321,6 +329,8 @@ test('all disabled signals avoid SDK initialization and signal hooks', async () 
   const counts = ['SIGTERM', 'SIGINT'].map(signal => process.listenerCount(signal));
   const handle = await unified.init({ serviceName: 'disabled', enableLogging: false,
     enableTracing: false, enableMetrics: false });
+  assert.equal(unified.tracer, handle.tracer);
+  assert.equal(unified.metrics, handle.metrics);
   assert.equal(capture.telemetry, undefined);
   assert.deepEqual(handle.getStatus().components, { logging: 'disabled', tracing: 'disabled', metrics: 'disabled' });
   await handle.forceFlush();
