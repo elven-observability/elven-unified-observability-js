@@ -33,7 +33,7 @@
     "test": "npm run build && node --test tests/**/*.test.cjs",
     "validate:candidate": "node scripts/validate-candidate.cjs",
     "package:check": "npm run build && npm pack --dry-run",
-    "prepublishOnly": "node scripts/verify-public-lock.cjs && npm run typecheck && npm test && npm run package:check"
+    "prepublishOnly": "node scripts/verify-public-lock.cjs && npm run typecheck && npm test && npm run package:check && npm audit --omit=dev --registry=https://registry.npmjs.org"
   },
   "keywords": [
     "observability",
