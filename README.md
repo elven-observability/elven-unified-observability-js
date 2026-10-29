@@ -12,11 +12,12 @@ A unified wrapper for **Logs Interceptor** and **OpenTelemetry Instrumentation**
 
 ## Installation
 
-This working tree is the **1.2.0 source candidate**, targeting the exact Elven
-instrumentation SDK **2.0.0-rc.1**. It is not a published or production-approved
-release. The SDK candidate was unavailable from the public registry during the
-2026-09-05 review, so use the checksummed archive workflow in
-[Candidate validation](docs/candidate-validation.md) for local tests.
+This working tree is the **1.2.0 source candidate**, recovered and reviewed on
+2026-10-29. It is not a published or production-approved release. It retains
+the stable 1.x instrumentation and logs APIs; unpublished release candidates,
+local archives and mixed OpenTelemetry generations are blocked by the package
+release checks. Dependency floors must be updated to independently validated
+public releases before this wrapper can be published.
 
 After both exact versions have been published through the release gates:
 
@@ -24,9 +25,13 @@ After both exact versions have been published through the release gates:
 npm install elven-unified-observability-js@1.2.0
 ```
 
-Candidate Node support is 20.6+, 22, 24 and 26+. This does not declare every
-runtime/framework/platform combination validated. The wrapper keeps its existing
-ISC license; the instrumentation dependency has its own license.
+The dependency engine range remains compatible with Node 18.19+ and 20.6+.
+An installable legacy runtime is not a security-support commitment. Prefer a
+maintained Node LTS and validate your framework/platform. The wrapper keeps its
+existing ISC license; its dependencies have their own licenses.
+
+Central documentation is maintained in [Git](https://github.com/elvenworks-ps/docs.elven.works)
+and available at [Elven Docs](https://docs.elven.works/elven-observability/integracao-e-instrumentacao/javascript/instrumentacao-node.js-com-elven-observability.html).
 
 ## Quick Start (Zero Code)
 
@@ -49,7 +54,8 @@ ISC license; the instrumentation dependency has its own license.
    export ENABLE_LOGGING="true"
    export ENABLE_TRACING="true"
    export ENABLE_METRICS="true"
-   export OTEL_TRACES_SAMPLER="always_on"
+   export OTEL_TRACES_SAMPLER="parentbased_traceidratio"
+   export OTEL_TRACES_SAMPLER_ARG="0.1"
    ```
 
 2. **Run Application**:
@@ -61,8 +67,8 @@ ISC license; the instrumentation dependency has its own license.
    The register preload reads the process environment supplied by the runtime.
    It does not load `.env` files automatically.
 
-   On `SIGINT` or `SIGTERM`, the unified wrapper flushes and shuts down logs,
-   traces, and metrics before the process exits.
+   On `SIGINT` or `SIGTERM`, the wrapper attempts bounded cleanup and preserves
+   application-owned signal handling. Buffered telemetry may be dropped.
 
 3. **Development (ts-node-dev / nodemon)**:
 
@@ -111,6 +117,10 @@ ISC license; the instrumentation dependency has its own license.
 | `ENABLE_LOGGING`       | Master switch for logging | `true` |
 | `ENABLE_METRICS`       | Master switch for metrics | `true` |
 | `ENABLE_TRACING`       | Master switch for tracing | `true` |
+| `UO_ENABLED` / `ELVEN_OBSERVABILITY_ENABLED` | `false` disables the preload before SDK imports | enabled |
+| `OTEL_SDK_DISABLED` | `true` disables the preload before SDK imports | unset |
+| `UO_INITIALIZATION_TIMEOUT_MS` | Maximum async SDK startup wait; capped at 60000 ms | `5000` |
+| `UO_SHUTDOWN_TIMEOUT_MS` | Maximum async flush/shutdown wait; capped at 60000 ms | `5000` |
 | `ELVEN_EXPORTER_MODE`  | `direct` or unified `collector` routing | `direct` |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | Shared OTLP collector base URL | - |
 | `OTEL_TRACES_SAMPLING_RATIO` | Trace sampling ratio | `0.1` |
@@ -195,3 +205,35 @@ telemetry claims. The returned handle retains API-backed fallback facades when
 the telemetry SDK cannot start; with no provider installed, those calls are
 no-ops and application callbacks still execute. The degraded status and error
 are preserved. Automatic application startup remains fail-open by default.
+
+## Resource And Privacy Contract
+
+The wrapper does not reserve a process-RSS limit or replace the dependencies'
+queue/redaction policies. Tune span queues, log bytes, batch concurrency,
+sampling and metric cardinality for the container and the number of workers.
+Each process has its own providers and resource cost. Never use request IDs,
+trace IDs, user IDs or arbitrary URLs as metric labels.
+
+Async wait deadlines do not cancel underlying I/O, preempt synchronous code or
+guarantee lossless delivery. Late successful SDK initialization is cleaned up;
+a cleanup still running prevents a replacement initialization from owning the
+same lifecycle. Diagnostics redact known credentials and truncate messages,
+but this is not a universal secret/PII classifier. Existing application stdout
+is not rewritten.
+
+Preload disable tests prove no wrapper SDK imports or signal hooks in that
+mode. API-backed manual facades can still use a provider installed by another
+library; do not interpret disabled ownership as global suppression of all OTel.
+Initialize once in each worker entrypoint and create a span per job/message,
+not one never-ending span around the consumer loop. A worker without an HTTP
+server should not be expected to emit HTTP server metrics.
+
+## Validation And Release
+
+Run `npm ci --ignore-scripts`, `npm run typecheck`, `npm test`,
+`npm audit --omit=dev`, `node scripts/verify-public-lock.cjs` and `npm pack --dry-run`.
+Tests decode real OTLP protobuf logs, traces and metrics from a local collector
+fixture and cover failure, deadlines, late cleanup, signal ownership and
+disabled preload. They do not qualify every database/framework, native runtime,
+customer collector or long-duration memory/CPU budget. A registry audit with
+findings remains a release gate even when unit tests pass.

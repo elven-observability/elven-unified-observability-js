@@ -4,7 +4,18 @@ const { spawn } = require('node:child_process');
 const path = require('node:path');
 const { test } = require('node:test');
 const { gunzipSync } = require('node:zlib');
-const wire = require('./protobuf-fixture.cjs');
+const protobuf = require('protobufjs');
+const schema = new protobuf.Root();
+schema.resolvePath = (_origin, target) => path.join(__dirname, 'protos', target);
+schema.loadSync(['trace', 'logs', 'metrics'].map(signal =>
+  `opentelemetry/proto/collector/${signal}/v1/${signal}_service.proto`));
+const requests = Object.fromEntries(['trace', 'logs', 'metrics'].map(signal => [
+  signal, schema.lookupType(`opentelemetry.proto.collector.${signal}.v1.Export${signal[0].toUpperCase() + signal.slice(1)}ServiceRequest`),
+]));
+function decode(record) {
+  const signal = record.path.endsWith('/traces') ? 'trace' : record.path.endsWith('/logs') ? 'logs' : 'metrics';
+  return requests[signal].decode(record.bytes);
+}
 
 test('exports correlated logs, traces, and metrics without application credentials', { timeout: 20_000 }, async () => {
   const paths = [];
@@ -82,17 +93,28 @@ test('exports correlated logs, traces, and metrics without application credentia
     assert.equal(record.headers['x-api-key'], undefined);
     assert.match(record.headers['content-type'], /application\/(x-)?protobuf/);
     assert.ok(record.bytes.length > 0);
-    assert.deepEqual(wire.serviceNames(record.bytes), ['unified-integration-test']);
+    const message = decode(record);
+    const resources = message.resourceSpans || message.resourceLogs || message.resourceMetrics;
+    assert.deepEqual(resources.map(resource =>
+      resource.resource.attributes.find(attr => attr.key === 'service.name').value.stringValue),
+      ['unified-integration-test']);
   }
-  const spans = captured.filter((record) => record.path.endsWith('/v1/traces')).flatMap((record) => wire.records(record.bytes));
-  const span = spans.find((record) => wire.string(record, 5) === 'integration-span');
+  const spans = captured.filter(record => record.path.endsWith('/v1/traces'))
+    .flatMap(record => decode(record).resourceSpans.flatMap(resource =>
+      resource.scopeSpans.flatMap(scope => scope.spans)));
+  const span = spans.find(record => record.name === 'integration-span');
   assert.ok(span, 'actual OTLP payload must contain the emitted span');
-  assert.equal(wire.first(span, 1).toString('hex'), activeSpanContext.traceId);
-  assert.equal(wire.first(span, 2).toString('hex'), activeSpanContext.spanId);
-  const logs = captured.filter((record) => record.path.endsWith('/v1/logs')).flatMap((record) => wire.records(record.bytes));
-  assert.ok(logs.some((record) => wire.first(record, 9).toString('hex') === activeSpanContext.traceId && wire.first(record, 10).toString('hex') === activeSpanContext.spanId), 'OTLP log must carry the real active trace and span IDs');
-  const metrics = captured.filter((record) => record.path.endsWith('/v1/metrics')).flatMap((record) => wire.records(record.bytes));
-  assert.ok(metrics.some((record) => wire.string(record, 1) === 'integration_counter'));
+  assert.equal(span.traceId.toString('hex'), activeSpanContext.traceId);
+  assert.equal(span.spanId.toString('hex'), activeSpanContext.spanId);
+  const logs = captured.filter(record => record.path.endsWith('/v1/logs'))
+    .flatMap(record => decode(record).resourceLogs.flatMap(resource =>
+      resource.scopeLogs.flatMap(scope => scope.logRecords)));
+  assert.ok(logs.some(record => record.traceId.toString('hex') === activeSpanContext.traceId
+    && record.spanId.toString('hex') === activeSpanContext.spanId), 'OTLP log must carry real active IDs');
+  const metrics = captured.filter(record => record.path.endsWith('/v1/metrics'))
+    .flatMap(record => decode(record).resourceMetrics.flatMap(resource =>
+      resource.scopeMetrics.flatMap(scope => scope.metrics)));
+  assert.ok(metrics.some(record => record.name === 'integration_counter'));
 });
 
 test('signal cleanup preserves the application exit code', async () => {

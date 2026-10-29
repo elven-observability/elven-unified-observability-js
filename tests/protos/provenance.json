@@ -1,0 +1,52 @@
+{
+  "source_repository": "open-telemetry/opentelemetry-proto",
+  "commit": "40cb2e516c60dd91796d909c7277e36a20c38b55",
+  "purpose": "Tests only; not a runtime package dependency or shipped schema fork",
+  "files": [
+    {
+      "path": "LICENSE",
+      "url": "https://raw.githubusercontent.com/open-telemetry/opentelemetry-proto/40cb2e516c60dd91796d909c7277e36a20c38b55/LICENSE",
+      "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4"
+    },
+    {
+      "path": "opentelemetry/proto/common/v1/common.proto",
+      "url": "https://raw.githubusercontent.com/open-telemetry/opentelemetry-proto/40cb2e516c60dd91796d909c7277e36a20c38b55/opentelemetry/proto/common/v1/common.proto",
+      "sha256": "4c8c143ac8c190544a3d31dcd5719d6fbc943b89037faa1cef6015c76cbdefc1"
+    },
+    {
+      "path": "opentelemetry/proto/resource/v1/resource.proto",
+      "url": "https://raw.githubusercontent.com/open-telemetry/opentelemetry-proto/40cb2e516c60dd91796d909c7277e36a20c38b55/opentelemetry/proto/resource/v1/resource.proto",
+      "sha256": "34fe1c26b8959f09d97656348ae03b105d15a5f07ada0f8f1614ef5dff7d1569"
+    },
+    {
+      "path": "opentelemetry/proto/trace/v1/trace.proto",
+      "url": "https://raw.githubusercontent.com/open-telemetry/opentelemetry-proto/40cb2e516c60dd91796d909c7277e36a20c38b55/opentelemetry/proto/trace/v1/trace.proto",
+      "sha256": "45a33961142210add67d583cc525702fb985afdbae181e6daf2143929bad0613"
+    },
+    {
+      "path": "opentelemetry/proto/collector/trace/v1/trace_service.proto",
+      "url": "https://raw.githubusercontent.com/open-telemetry/opentelemetry-proto/40cb2e516c60dd91796d909c7277e36a20c38b55/opentelemetry/proto/collector/trace/v1/trace_service.proto",
+      "sha256": "03c8cc4e3e101087d884392d6eda32152ad5cd696e6344f50deaa59804a75c7a"
+    },
+    {
+      "path": "opentelemetry/proto/logs/v1/logs.proto",
+      "url": "https://raw.githubusercontent.com/open-telemetry/opentelemetry-proto/40cb2e516c60dd91796d909c7277e36a20c38b55/opentelemetry/proto/logs/v1/logs.proto",
+      "sha256": "0c9d0c45eea723d38ef28ee13135ff61c037387f41cacc476ccac3485d6c138a"
+    },
+    {
+      "path": "opentelemetry/proto/collector/logs/v1/logs_service.proto",
+      "url": "https://raw.githubusercontent.com/open-telemetry/opentelemetry-proto/40cb2e516c60dd91796d909c7277e36a20c38b55/opentelemetry/proto/collector/logs/v1/logs_service.proto",
+      "sha256": "0252687fc8f59d139ced709d383e83678e9bd4957bdbe76077242f1c32363fa5"
+    },
+    {
+      "path": "opentelemetry/proto/metrics/v1/metrics.proto",
+      "url": "https://raw.githubusercontent.com/open-telemetry/opentelemetry-proto/40cb2e516c60dd91796d909c7277e36a20c38b55/opentelemetry/proto/metrics/v1/metrics.proto",
+      "sha256": "9663b2670f980041e73a71a7c09fdf4fe0bc64056be762f2fcbd2642c4d112a3"
+    },
+    {
+      "path": "opentelemetry/proto/collector/metrics/v1/metrics_service.proto",
+      "url": "https://raw.githubusercontent.com/open-telemetry/opentelemetry-proto/40cb2e516c60dd91796d909c7277e36a20c38b55/opentelemetry/proto/collector/metrics/v1/metrics_service.proto",
+      "sha256": "2bb3c6adee5f7609c8a32c5e4b1ec57057320015e298e9cf136699a42abc24d7"
+    }
+  ]
+}

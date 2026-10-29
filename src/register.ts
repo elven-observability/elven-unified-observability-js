@@ -1,6 +1,4 @@
 
-import { init } from './index';
-
 // Helper to safely parse numbers
 const getIntEnv = (key: string, defaultVal: number): number => {
   const val = process.env[key];
@@ -73,6 +71,13 @@ const getExportMode = (): 'direct' | 'collector' => {
 // Auto-initialize based on Environment Variables
 const bootstrap = async () => {
   try {
+    const masterDisabled = !getBoolEnv('UO_ENABLED', true)
+      || !getBoolEnv('ELVEN_OBSERVABILITY_ENABLED', true)
+      || getBoolEnv('OTEL_SDK_DISABLED', false);
+    if (masterDisabled || !['ENABLE_LOGGING', 'ENABLE_METRICS', 'ENABLE_TRACING']
+      .some((key) => getBoolEnv(key, true))) return;
+    // Load synchronously after the kill switch, before application frameworks.
+    const { init } = require('./index') as typeof import('./index');
     // Debug: Check if envs are actually loaded
     if (process.env.LOGS_DEBUG === 'true' || process.env.LOKI_DEBUG === 'true') {
       console.log('[unified-observability] DEBUG Mode Enabled');
@@ -192,6 +197,8 @@ const bootstrap = async () => {
       enableLogging,
       enableMetrics,
       enableTracing,
+      initializationTimeoutMillis: getIntEnv('UO_INITIALIZATION_TIMEOUT_MS', 5000),
+      shutdownTimeoutMillis: getIntEnv('UO_SHUTDOWN_TIMEOUT_MS', 5000),
       logging: loggingConfig,
       telemetry: {
         autoShutdown: true,

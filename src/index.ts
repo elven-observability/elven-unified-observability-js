@@ -35,10 +35,14 @@ let lifecycleState: LifecycleState = 'idle';
 let initializationPromise: Promise<UnifiedObservabilityHandle> | null = null;
 let shutdownPromise: Promise<void> | null = null;
 let telemetryHandle: ObservabilityHandle | null = null;
+let abandonedTelemetryCleanup: Promise<void> | null = null;
 let fallbackTracer: TracerFacade | null = null;
 let fallbackMetrics: MetricFacade | null = null;
 let activeLogger: ILogger = logger as any;
 let gracefulShutdownHookRegistered = false;
+const signalHandlers = new Map<NodeJS.Signals, () => void>();
+let loggingActive = false;
+let lifecycleTimeoutMillis = 5000;
 let currentStatus: UnifiedObservabilityStatus = createIdleStatus();
 
 export interface UnifiedObservabilityHandle {
@@ -63,7 +67,7 @@ export async function init(config: UnifiedObservabilityConfig): Promise<UnifiedO
     return createUnifiedHandle();
   }
   if (lifecycleState === 'stopping' && shutdownPromise) {
-    await shutdownPromise;
+    await withTimeout(shutdownPromise, lifecycleTimeoutMillis, 'previous shutdown');
   }
 
   const pending = start(config);
@@ -82,11 +86,12 @@ async function start(config: UnifiedObservabilityConfig): Promise<UnifiedObserva
   const version = config.version || '1.0.0';
   const environment = config.environment || 'development';
   const failOpen = config.failOpen ?? true;
+  lifecycleTimeoutMillis = boundedTimeout(config.shutdownTimeoutMillis);
 
   // Feature Flags (Default to true)
   const enableLogging = config.enableLogging ?? true;
-  const enableMetrics = config.enableMetrics ?? true;
-  const enableTracing = config.enableTracing ?? true;
+  const enableMetrics = normalizeMetricsConfig(config.telemetry?.metrics, config.enableMetrics ?? true).enabled ?? true;
+  const enableTracing = normalizeTracingConfig(config.telemetry?.tracing, config.telemetry?.sampling, config.enableTracing ?? true).enabled ?? true;
   const errors: UnifiedInitializationError[] = [];
 
   currentStatus = {
@@ -123,6 +128,7 @@ async function start(config: UnifiedObservabilityConfig): Promise<UnifiedObserva
         environment: environment,
       });
       activeLogger = loggerInstance;
+      loggingActive = true;
       currentStatus.components.logging = 'ready';
     } catch (err) {
       const message = formatError(err);
@@ -132,7 +138,7 @@ async function start(config: UnifiedObservabilityConfig): Promise<UnifiedObserva
   }
 
   // 2. Initialize Telemetry
-  try {
+  if (enableTracing || enableMetrics) try {
     assertCollectorTelemetryEndpoints(config, enableTracing, enableMetrics);
     const telemetryConfig = buildTelemetryConfig(buildTelemetryForExportMode(config), {
       serviceName,
@@ -142,7 +148,21 @@ async function start(config: UnifiedObservabilityConfig): Promise<UnifiedObserva
       enableMetrics,
       enableTracing,
     });
-    telemetryHandle = await initObservability(telemetryConfig);
+    let abandoned = false;
+    const pendingTelemetry = initObservability(telemetryConfig);
+    const pendingCleanup = pendingTelemetry.then(async (handle) => {
+      if (abandoned) await handle.shutdown();
+    }, () => {});
+    void pendingCleanup.catch(() => {});
+    try {
+      telemetryHandle = await withTimeout(
+        pendingTelemetry, boundedTimeout(config.initializationTimeoutMillis), 'initialization'
+      );
+    } catch (error) {
+      abandoned = true;
+      abandonedTelemetryCleanup = pendingCleanup;
+      throw error;
+    }
     if (enableTracing) currentStatus.components.tracing = 'ready';
     if (enableMetrics) currentStatus.components.metrics = 'ready';
   } catch (err) {
@@ -156,22 +176,14 @@ async function start(config: UnifiedObservabilityConfig): Promise<UnifiedObserva
   lifecycleState = 'started';
 
   if (errors.length > 0 && !failOpen) {
-    const cleanupResults = await Promise.allSettled([
-      destroyLogger(),
-      telemetryHandle?.shutdown() ?? Promise.resolve(),
-    ]);
-    telemetryHandle = null;
-    activeLogger = logger as any;
-    lifecycleState = 'idle';
-    const cleanupErrors = rejectedMessages(cleanupResults);
-    currentStatus = createIdleStatus([
-      ...errors,
-      ...cleanupErrors.map((message) => ({ component: 'telemetry' as const, message })),
-    ]);
+    const cleanupResults = await Promise.allSettled([shutdown()]);
+    currentStatus = { ...currentStatus, healthy: false, partial: false, errors: [
+      ...errors, ...rejectedMessages(cleanupResults).map((message) => ({ component: 'telemetry' as const, message })),
+    ] };
     throw new Error(`Unified observability initialization failed: ${formatInitializationErrors(errors)}`);
   }
 
-  if ((config.telemetry?.autoShutdown ?? true) && !gracefulShutdownHookRegistered) {
+  if ((loggingActive || telemetryHandle) && (config.telemetry?.autoShutdown ?? true) && !gracefulShutdownHookRegistered) {
     registerGracefulShutdownHook();
   }
 
@@ -239,33 +251,42 @@ function buildTelemetryForExportMode(
 
 export async function forceFlush(): Promise<void> {
   const results = await Promise.allSettled([
-    activeLogger.flush(),
-    telemetryHandle?.forceFlush() ?? Promise.resolve(),
+    withTimeout(invoke(() => loggingActive ? activeLogger.flush() : Promise.resolve()), lifecycleTimeoutMillis, 'logger flush'),
+    withTimeout(invoke(() => telemetryHandle?.forceFlush() ?? Promise.resolve()), lifecycleTimeoutMillis, 'telemetry flush'),
   ]);
   throwIfRejected(results, 'Unified observability force flush failed');
 }
 
 export async function shutdown(): Promise<void> {
   if (lifecycleState === 'idle') return;
-  if (lifecycleState === 'stopping' && shutdownPromise) return shutdownPromise;
+  if (lifecycleState === 'stopping' && shutdownPromise) {
+    return withTimeout(shutdownPromise, lifecycleTimeoutMillis, 'shutdown');
+  }
   if (lifecycleState === 'starting' && initializationPromise) {
-    await initializationPromise;
+    return withTimeout(initializationPromise.then(() => shutdown(), () => shutdown()),
+      lifecycleTimeoutMillis, 'shutdown during initialization');
   }
 
   lifecycleState = 'stopping';
   currentStatus = { ...currentStatus, state: 'stopping' };
   const handle = telemetryHandle;
+  const lateCleanup = abandonedTelemetryCleanup;
+  const destroyLogging = loggingActive;
   telemetryHandle = null;
+  loggingActive = false;
   activeLogger = logger as any;
 
   shutdownPromise = (async () => {
     const results = await Promise.allSettled([
-      destroyLogger(),
-      handle?.shutdown() ?? Promise.resolve(),
+      invoke(() => destroyLogging ? destroyLogger() : Promise.resolve()),
+      invoke(() => handle?.shutdown() ?? Promise.resolve()),
+      lateCleanup ?? Promise.resolve(),
     ]);
     const errors = rejectedMessages(results);
     lifecycleState = 'idle';
+    abandonedTelemetryCleanup = null;
     shutdownPromise = null;
+    removeGracefulShutdownHooks();
     currentStatus = createIdleStatus(
       errors.map((message) => ({ component: 'telemetry', message }))
     );
@@ -274,7 +295,7 @@ export async function shutdown(): Promise<void> {
     }
   })();
 
-  return shutdownPromise;
+  return withTimeout(shutdownPromise, lifecycleTimeoutMillis, 'shutdown');
 }
 
 export function isInitialized(): boolean {
@@ -326,10 +347,10 @@ function buildTelemetryConfig(
   } = safeTelemetry;
 
   const mergedService = buildServiceConfig(serviceIdentity, service);
+  const strictTelemetryPassthrough = { ...telemetryPassthrough, failOpen: false };
   return {
-    ...telemetryPassthrough,
+    ...strictTelemetryPassthrough,
     autoShutdown: false,
-    failOpen: false,
     service: mergedService,
     instrumentations: normalizeInstrumentations(instrumentations),
     metrics: normalizeMetricsConfig(telemetryMetrics, featureFlags.enableMetrics),
@@ -428,7 +449,7 @@ function throwIfRejected(
     .map((result) => result.reason);
   if (errors.length > 0) {
     const details = errors
-      .map((error) => error instanceof Error ? error.message : String(error))
+      .map(formatError)
       .join('; ');
     throw new Error(`${message}: ${details}`);
   }
@@ -438,6 +459,7 @@ function registerGracefulShutdownHook(): void {
   gracefulShutdownHookRegistered = true;
   const onSignal = async (signal: NodeJS.Signals) => {
     const hadExplicitExitCode = process.exitCode !== undefined;
+    const hadApplicationHandler = process.listenerCount(signal) > 0;
     try {
       await shutdown();
     } catch (error) {
@@ -447,14 +469,46 @@ function registerGracefulShutdownHook(): void {
       );
     }
 
-    gracefulShutdownHookRegistered = false;
-    if (!hadExplicitExitCode && process.listenerCount(signal) === 0) {
+    removeGracefulShutdownHooks();
+    if (!hadApplicationHandler && !hadExplicitExitCode && process.exitCode === undefined) {
       process.kill(process.pid, signal);
     }
   };
 
-  process.once('SIGINT', () => { void onSignal('SIGINT'); });
-  process.once('SIGTERM', () => { void onSignal('SIGTERM'); });
+  for (const signal of ['SIGINT', 'SIGTERM'] as const) {
+    const handler = () => { void onSignal(signal); };
+    signalHandlers.set(signal, handler);
+    process.prependOnceListener(signal, handler);
+  }
+}
+
+function removeGracefulShutdownHooks(): void {
+  for (const [signal, handler] of signalHandlers) process.removeListener(signal, handler);
+  signalHandlers.clear();
+  gracefulShutdownHookRegistered = false;
+}
+
+function boundedTimeout(value: number | undefined): number {
+  return value !== undefined && Number.isFinite(value) && value >= 1
+    ? Math.min(Math.floor(value), 60000) : 5000;
+}
+
+async function withTimeout<T>(operation: Promise<T>, millis: number, phase: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      operation,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`Unified observability ${phase} exceeded ${millis} ms`)), millis);
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
+function invoke<T>(operation: () => T | Promise<T>): Promise<T> {
+  try { return Promise.resolve(operation()); } catch (error) { return Promise.reject(error); }
 }
 
 function finalizeStartedStatus(
@@ -498,7 +552,14 @@ function cloneStatus(status: UnifiedObservabilityStatus): UnifiedObservabilitySt
 }
 
 function formatError(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
+  try {
+    const message = (error instanceof Error ? error.message : String(error)).slice(0, 1024);
+    return message.replace(/https?:\/\/[^\s]+/gi, (value) => {
+      try { return new URL(value).origin + '/[REDACTED]'; } catch { return '[REDACTED URL]'; }
+    }).replace(/((?:password|passwd|token|authorization|api[_-]?key)\s*[:=]\s*)[^\s,;]+/gi, '$1[REDACTED]');
+  } catch {
+    return 'Telemetry component failed with an unreadable error';
+  }
 }
 
 function rejectedMessages(results: PromiseSettledResult<void>[]): string[] {

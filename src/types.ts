@@ -156,6 +156,12 @@ export interface UnifiedObservabilityConfig {
   /** Keep application startup alive when one telemetry component cannot start. */
   failOpen?: boolean;
 
+  /** Maximum async initialization wait; default 5000 ms, maximum 60000 ms. */
+  initializationTimeoutMillis?: number;
+
+  /** Maximum flush/shutdown wait; default 5000 ms, maximum 60000 ms. */
+  shutdownTimeoutMillis?: number;
+
   /**
    * Enable/Disable Logging
    * Default: true
