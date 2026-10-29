@@ -1,0 +1,11 @@
+# Proteção obrigatória antes de qualquer git init neste diretório.
+# O .env local contém credenciais reais (LOGS_TOKEN) e NUNCA pode ser versionado.
+.env
+.env.*
+!.env.example
+node_modules/
+dist/
+.DS_Store
+.logs-dlq/
+*.tgz
+*.log
