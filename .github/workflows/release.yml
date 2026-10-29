@@ -1,0 +1,91 @@
+name: Manual npm Release
+on:
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: Exact current main commit SHA with successful main CI
+        required: true
+        type: string
+      version:
+        description: Exact stable package version
+        required: true
+        type: string
+      confirmation:
+        description: Type publish PACKAGE@VERSION
+        required: true
+        type: string
+permissions:
+  contents: read
+concurrency:
+  group: manual-npm-release
+  cancel-in-progress: false
+env:
+  EXPECTED_SHA: ${{ inputs.sha }}
+  EXPECTED_VERSION: ${{ inputs.version }}
+  CONFIRM: ${{ inputs.confirmation }}
+  NPM_CONFIG_PROVENANCE: 'true'
+jobs:
+  validate:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 24.x
+          cache: npm
+      - name: Verify public source, main SHA, green main CI and unused version
+        run: node scripts/release-guard.cjs
+        env:
+          GH_TOKEN: ${{ github.token }}
+      - run: npm ci
+      - run: node scripts/verify-public-lock.cjs
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run package:check
+      - run: npm audit --omit=dev --registry=https://registry.npmjs.org
+      - name: Pack reviewed artifact
+        run: node scripts/release-guard.cjs pack
+        env:
+          GH_TOKEN: ${{ github.token }}
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: validated-npm-package
+          path: release/
+          if-no-files-found: error
+  publish:
+    needs: validate
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 24.x
+          registry-url: https://registry.npmjs.org/
+      - run: npm install --global npm@11.21.1
+      - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6
+        with:
+          name: validated-npm-package
+          path: release/
+      - name: Recheck main, CI, registry and exact archive
+        run: node scripts/release-guard.cjs archive
+        env:
+          GH_TOKEN: ${{ github.token }}
+      - name: Publish exact validated archive with mandatory provenance
+        run: |
+          test -n "$NODE_AUTH_TOKEN" || { echo "NPM_TOKEN is not configured"; exit 1; }
+          npm publish ./release/package.tgz --ignore-scripts --provenance --access public --registry https://registry.npmjs.org/
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

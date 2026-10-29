@@ -106,6 +106,34 @@ test('passes structured telemetry config and master switches always win', async 
   assert.equal(capture.telemetry.autoShutdown, false);
 });
 
+test('collector owns exact log routing and does not reuse legacy logger headers', async () => {
+  const capture = {};
+  const unified = loadIndexWithFakes(capture);
+  const oldTransport = Object.freeze({
+    url: 'https://old-logs.example.test',
+    logsUrl: 'https://old-logs.example.test/exact',
+    headers: Object.freeze({ authorization: 'Bearer obsolete-marker', 'x-api-key': 'obsolete-marker' }),
+  });
+  await unified.init({
+    serviceName: 'collector-routing',
+    exportMode: 'collector',
+    collector: {
+      endpoint: 'https://collector.example.test/otel',
+      logsEndpoint: 'https://collector.example.test/gateway/custom',
+      headers: { 'x-api-key': 'current-collector-marker' },
+    },
+    enableTracing: false,
+    enableMetrics: false,
+    logging: { transport: oldTransport },
+    telemetry: { autoShutdown: false },
+  });
+  assert.equal(capture.logging.transport.url, 'https://collector.example.test/otel');
+  assert.equal(capture.logging.transport.logsUrl, 'https://collector.example.test/gateway/custom');
+  assert.deepEqual(capture.logging.transport.headers, { 'x-api-key': 'current-collector-marker' });
+  assert.equal(oldTransport.headers.authorization, 'Bearer obsolete-marker');
+  await unified.shutdown();
+});
+
 test('register applies bounded defaults and ignores invalid numeric env values', async () => {
   process.env = {
     ...originalEnv,
@@ -139,6 +167,98 @@ test('register applies bounded defaults and ignores invalid numeric env values',
   assert.equal(captured.logging.performance.maxPendingBatches, 2);
   assert.equal(captured.logging.deadLetterQueue.type, 'memory');
   assert.equal(captured.logging.deadLetterQueue.maxSize, 100);
+});
+
+test('collector refuses ambient OTLP headers for a different destination without mutating env', async () => {
+  process.env = { ...originalEnv,
+    OTEL_EXPORTER_OTLP_ENDPOINT: 'https://collector-a.example.test/base',
+    OTEL_EXPORTER_OTLP_HEADERS: 'x-global=synthetic-for-a',
+    OTEL_EXPORTER_OTLP_LOGS_HEADERS: 'x-logs=synthetic-for-a',
+    OTEL_EXPORTER_OTLP_TRACES_HEADERS: 'x-traces=synthetic-for-a',
+    OTEL_EXPORTER_OTLP_METRICS_HEADERS: 'x-metrics=synthetic-for-a',
+  };
+  const environment = { ...process.env };
+  const capture = {};
+  const unified = loadIndexWithFakes(capture);
+  const handle = await unified.init({
+    serviceName: 'collector-ownership', exportMode: 'collector',
+    collector: { endpoint: 'https://collector-b.example.test', headers: { 'x-b': 'synthetic-for-b' } },
+    telemetry: { autoShutdown: false },
+  });
+  assert.equal(capture.logging, undefined);
+  assert.equal(capture.telemetry, undefined);
+  assert.equal(handle.getStatus().healthy, false);
+  assert.ok(handle.getStatus().errors.every(error => !/synthetic-for|collector-[ab]\.example/.test(error.message)));
+  assert.deepEqual(process.env, environment);
+  await handle.shutdown();
+});
+
+test('collector preserves environment-owned destinations and signal-specific overrides', async () => {
+  process.env = { ...originalEnv,
+    OTEL_EXPORTER_OTLP_ENDPOINT: 'https://collector-a.example.test/base',
+    OTEL_EXPORTER_OTLP_HEADERS: 'x-global=synthetic-for-a',
+    OTEL_EXPORTER_OTLP_LOGS_ENDPOINT: 'https://logs.example.test/gateway/custom',
+    OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: 'https://traces.example.test/exact',
+    OTEL_EXPORTER_OTLP_METRICS_ENDPOINT: 'https://metrics.example.test/exact',
+  };
+  const capture = {};
+  const unified = loadIndexWithFakes(capture);
+  const handle = await unified.init({
+    serviceName: 'collector-owned-env', exportMode: 'collector',
+    collector: {
+      endpoint: process.env.OTEL_EXPORTER_OTLP_ENDPOINT,
+      logsEndpoint: process.env.OTEL_EXPORTER_OTLP_LOGS_ENDPOINT,
+      tracesEndpoint: process.env.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT,
+      metricsEndpoint: process.env.OTEL_EXPORTER_OTLP_METRICS_ENDPOINT,
+    },
+    telemetry: { autoShutdown: false },
+  });
+  assert.equal(handle.getStatus().healthy, true);
+  assert.ok(capture.logging);
+  assert.ok(capture.telemetry);
+  await handle.shutdown();
+});
+
+test('collector rejects ambiguous inherited routes but preserves explicit query endpoints', async () => {
+  for (const suffix of ['?owner=ambient', '//']) {
+    process.env = { ...originalEnv,
+      OTEL_EXPORTER_OTLP_ENDPOINT: `https://collector.example.test/prefix${suffix}`,
+      OTEL_EXPORTER_OTLP_HEADERS: 'x-global=synthetic-owner',
+    };
+    const capture = {};
+    const unified = loadIndexWithFakes(capture);
+    const handle = await unified.init({
+      serviceName: 'ambiguous-route', exportMode: 'collector',
+      collector: { endpoint: process.env.OTEL_EXPORTER_OTLP_ENDPOINT },
+      telemetry: { autoShutdown: false },
+    });
+    assert.equal(capture.logging, undefined);
+    assert.equal(capture.telemetry, undefined);
+    assert.equal(handle.getStatus().healthy, false);
+    await handle.shutdown();
+  }
+  process.env = { ...originalEnv,
+    OTEL_EXPORTER_OTLP_ENDPOINT: 'https://collector.example.test/prefix/',
+    OTEL_EXPORTER_OTLP_HEADERS: 'x-global=synthetic-owner',
+    OTEL_EXPORTER_OTLP_LOGS_ENDPOINT: 'https://collector.example.test/custom/logs?owner=ambient',
+    OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: 'https://collector.example.test/custom/traces?owner=ambient',
+    OTEL_EXPORTER_OTLP_METRICS_ENDPOINT: 'https://collector.example.test/custom/metrics?owner=ambient',
+  };
+  const capture = {};
+  const unified = loadIndexWithFakes(capture);
+  const handle = await unified.init({
+    serviceName: 'explicit-query-route', exportMode: 'collector',
+    collector: {
+      endpoint: process.env.OTEL_EXPORTER_OTLP_ENDPOINT,
+      logsEndpoint: process.env.OTEL_EXPORTER_OTLP_LOGS_ENDPOINT,
+      tracesEndpoint: process.env.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT,
+      metricsEndpoint: process.env.OTEL_EXPORTER_OTLP_METRICS_ENDPOINT,
+    },
+    telemetry: { autoShutdown: false },
+  });
+  assert.equal(handle.getStatus().healthy, true);
+  assert.ok(capture.logging && capture.telemetry);
+  await handle.shutdown();
 });
 
 test('collector mode routes every signal through one OTLP base endpoint', async () => {

@@ -117,6 +117,165 @@ test('exports correlated logs, traces, and metrics without application credentia
   assert.ok(metrics.some(record => record.name === 'integration_counter'));
 });
 
+test('exact log gateway preserves its path and only receives collector-owned headers', { timeout: 10_000 }, async () => {
+  const received = [];
+  const server = http.createServer((req, res) => {
+    const chunks = [];
+    req.on('data', chunk => chunks.push(chunk));
+    req.once('end', () => {
+      received.push({ path: req.url, headers: req.headers, body: Buffer.concat(chunks) });
+      res.setHeader('content-type', 'application/x-protobuf');
+      res.end();
+    });
+  });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  let handle;
+  try {
+    const endpoint = `http://127.0.0.1:${server.address().port}`;
+    handle = await require('../dist/index.js').init({
+      serviceName: 'exact-gateway-test',
+      exportMode: 'collector',
+      collector: {
+        endpoint: `${endpoint}/otel`,
+        logsEndpoint: `${endpoint}/gateway/custom`,
+        headers: { 'x-api-key': 'current-collector-marker' },
+      },
+      enableTracing: false,
+      enableMetrics: false,
+      failOpen: false,
+      telemetry: { autoShutdown: false },
+      logging: {
+        transport: {
+          url: `${endpoint}/obsolete`,
+          logsUrl: `${endpoint}/obsolete/exact`,
+          headers: { authorization: 'Bearer obsolete-marker', 'x-api-key': 'obsolete-marker', 'x-scope-orgid': 'obsolete-tenant' },
+          compression: 'none', maxRetries: 0, timeout: 1000,
+        },
+        buffer: { autoFlush: false },
+        deadLetterQueue: { enabled: false },
+      },
+    });
+    handle.logger.info('exact-gateway-log');
+    await handle.forceFlush();
+    assert.equal(received.length, 1);
+    assert.equal(received[0].path, '/gateway/custom');
+    assert.equal(received[0].headers['x-api-key'], 'current-collector-marker');
+    assert.equal(received[0].headers.authorization, undefined);
+    assert.equal(received[0].headers['x-scope-orgid'], undefined);
+    const logs = requests.logs.decode(received[0].body).resourceLogs
+      .flatMap(resource => resource.scopeLogs.flatMap(scope => scope.logRecords));
+    assert.ok(logs.some(record => record.body.stringValue === 'exact-gateway-log'));
+  } finally {
+    if (handle) await handle.shutdown();
+    server.closeAllConnections();
+    await new Promise(resolve => server.close(resolve));
+  }
+});
+
+test('native ESM named facades imported before init stay usable and match the handle', { timeout: 10_000 }, async () => {
+  const source = `
+    import assert from 'node:assert/strict';
+    import unified, { init, tracer, metrics } from './dist/index.js';
+    import { createRequire } from 'node:module';
+    const require = createRequire(import.meta.url);
+    const api = require('@opentelemetry/api');
+    assert.equal(typeof tracer.withSpan, 'function');
+    assert.equal(typeof metrics.increment, 'function');
+    let callbacks = 0;
+    await tracer.withSpan('before-init', () => { callbacks++; });
+    const handle = await init({ serviceName: 'esm-facades', enableLogging: false,
+      enableTracing: false, enableMetrics: false, telemetry: { autoShutdown: false } });
+    assert.equal(tracer, handle.tracer);
+    assert.equal(metrics, handle.metrics);
+    assert.equal(tracer, unified.tracer);
+    assert.equal(metrics, unified.metrics);
+    await tracer.withSpan('after-init', () => { callbacks++; });
+    metrics.increment('disabled_counter');
+    assert.equal(callbacks, 2);
+    assert.notEqual(api.trace.getTracerProvider().constructor.name, 'TracerProvider');
+    await handle.shutdown();
+    await tracer.withSpan('after-shutdown', () => { callbacks++; });
+    assert.equal(callbacks, 3);
+    console.log('native-esm-facades-pass');
+  `;
+  const result = await new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, ['--input-type=module', '-e', source], {
+      cwd: path.resolve(__dirname, '..'), stdio: ['ignore', 'pipe', 'pipe'],
+      env: { PATH: process.env.PATH, HOME: process.env.HOME, OTEL_SDK_DISABLED: 'true' },
+    });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', chunk => { stdout += chunk.toString(); });
+    child.stderr.on('data', chunk => { stderr += chunk.toString(); });
+    child.once('error', reject);
+    child.once('exit', code => resolve({ code, stdout, stderr }));
+  });
+  assert.equal(result.code, 0, result.stderr);
+  assert.match(result.stdout, /native-esm-facades-pass/);
+  assert.equal(result.stderr, '');
+});
+
+for (const [profile, ambientSuffix, configuredSuffix] of [
+  ['different-route', '/old-owner', ''],
+  ['query-base', '/prefix?owner=ambient', '/prefix?owner=ambient'],
+  ['double-trailing', '/prefix//', '/prefix'],
+]) test(`ambient headers never cross an owned route (${profile})`, { timeout: 10_000 }, async () => {
+  const received = [];
+  const server = http.createServer((req, res) => {
+    received.push(req.url);
+    req.resume();
+    res.end();
+  });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  try {
+    const endpoint = `http://127.0.0.1:${server.address().port}`;
+    const source = `
+      import assert from 'node:assert/strict';
+      import { init } from './dist/index.js';
+      const handle = await init({ serviceName: 'ambient-owner-guard', exportMode: 'collector',
+        collector: { endpoint: ${JSON.stringify(endpoint + configuredSuffix)}, headers: { 'x-b': 'synthetic-for-b' } },
+        telemetry: { autoShutdown: false, instrumentations: false } });
+      assert.equal(handle.getStatus().healthy, false);
+      assert.equal(handle.getStatus().components.logging, 'degraded');
+      assert.equal(handle.getStatus().components.tracing, 'degraded');
+      assert.equal(handle.getStatus().components.metrics, 'degraded');
+      await handle.tracer.withSpan('fallback-operation', () => 42);
+      handle.metrics.increment('fallback_counter');
+      handle.logger.info('fallback-log');
+      await handle.forceFlush();
+      await handle.shutdown();
+      assert.equal(process.env.OTEL_EXPORTER_OTLP_HEADERS, 'x-global=synthetic-for-a');
+      console.log('ambient-owner-guard-pass');
+    `;
+    const result = await new Promise((resolve, reject) => {
+      const child = spawn(process.execPath, ['--input-type=module', '-e', source], {
+        cwd: path.resolve(__dirname, '..'), stdio: ['ignore', 'pipe', 'pipe'],
+        env: {
+          PATH: process.env.PATH, HOME: process.env.HOME,
+          OTEL_EXPORTER_OTLP_ENDPOINT: `${endpoint}${ambientSuffix}`,
+          OTEL_EXPORTER_OTLP_HEADERS: 'x-global=synthetic-for-a',
+          OTEL_EXPORTER_OTLP_LOGS_HEADERS: 'x-logs=synthetic-for-a',
+          OTEL_EXPORTER_OTLP_TRACES_HEADERS: 'x-traces=synthetic-for-a',
+          OTEL_EXPORTER_OTLP_METRICS_HEADERS: 'x-metrics=synthetic-for-a',
+        },
+      });
+      let stdout = '';
+      let stderr = '';
+      child.stdout.on('data', chunk => { stdout += chunk.toString(); });
+      child.stderr.on('data', chunk => { stderr += chunk.toString(); });
+      child.once('error', reject);
+      child.once('exit', code => resolve({ code, stdout, stderr }));
+    });
+    assert.equal(result.code, 0, result.stderr);
+    assert.match(result.stdout, /ambient-owner-guard-pass/);
+    assert.doesNotMatch(result.stdout + result.stderr, /synthetic-for-[ab]|old-owner/);
+    assert.deepEqual(received, []);
+  } finally {
+    server.closeAllConnections();
+    await new Promise(resolve => server.close(resolve));
+  }
+});
+
 test('signal cleanup preserves the application exit code', async () => {
   const packageRoot = path.resolve(__dirname, '..');
   const source = [

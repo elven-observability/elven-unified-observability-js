@@ -19,6 +19,16 @@ local archives and mixed OpenTelemetry generations are blocked by the package
 release checks. Dependency floors must be updated to independently validated
 public releases before this wrapper can be published.
 
+Publication is currently blocked by the public SDK dependency advisory and
+its unresolved performance gate. The public logger `1.1.1` also has a confirmed
+CPU-exhaustion issue with some accepted custom regex rules, including selector,
+context and label rules. Size caps and a clean registry advisory scan do not
+resolve that behavior. No compatible replacement matcher is qualified yet;
+do not treat this source candidate as a security-approved dependency upgrade.
+`release-policy.json` keeps the manual publisher closed for these known findings
+even if a later registry scan turns green. Clearing it requires reviewed source
+changes and qualification; successful API tests alone do not authorize release.
+
 After both exact versions have been published through the release gates:
 
 ```bash
@@ -144,7 +154,24 @@ _Note: `LOKI_` prefix is also supported for backward compatibility.\_
 
 In collector mode, `LOGS_URL`, `LOGS_TENANT`, and `LOGS_TOKEN` are not used.
 The package sends logs to `/v1/logs`, traces to `/v1/traces`, and metrics to
-`/v1/metrics` under the shared OTLP endpoint.
+`/v1/metrics` under the shared OTLP endpoint. An explicit `collector.logsEndpoint`
+is an exact URL, including custom gateway paths, not another collector base.
+Legacy `logging.transport` headers, tokens, tenants and exact destinations are
+not carried over to a different collector. Upstream OTLP exporters can also
+merge environment headers, even when a programmatic header object is empty.
+If inherited OTLP headers refer to a different signal destination, the wrapper
+refuses that component before startup and reports degraded status (or rejects
+strict initialization). It does not clear or temporarily modify the process
+environment. Environment-only preload configuration remains supported, including
+signal-specific endpoints/headers. When switching destinations by code, remove
+the old OTLP header/endpoint configuration or move the complete configuration
+to one owner; setting `collector.headers: {}` is not an isolation boundary.
+Generic inherited endpoints with query strings or repeated trailing slashes
+can resolve differently from programmatic endpoints. They are refused when
+the actual signal URLs differ. Explicit matching per-signal URLs, including
+query strings, remain supported. Headers without an environment endpoint are
+compared against the upstream localhost default, not assumed to belong to a
+different manually selected collector.
 
 ### Buffer & Performance
 
@@ -199,8 +226,13 @@ cleanup remains fenced against replacement initialization. Signal
 cleanup never calls `process.exit(0)`; explicit application exit codes and the
 default SIGINT/SIGTERM lifecycle are preserved.
 
-SDK facades are initialized asynchronously. In CommonJS, avoid destructuring
-`tracer` or `metrics` before `await init(...)`; use the returned handle. When
+The named `tracer` and `metrics` facades keep their identity in CommonJS and
+native ESM, including when imported before `await init(...)`. Use them after
+initialization, or use the returned handle. Instruments created before a
+provider starts are not replayed later. When
+using an active returned handle, its tracer and metrics retain that SDK
+generation; the module-level named facades follow the current process owner.
+The existing lifecycle/status methods remain process-global. When
 initialization is degraded, inspect component status before making manual
 telemetry claims. The returned handle retains API-backed fallback facades when
 the telemetry SDK cannot start; with no provider installed, those calls are
@@ -238,6 +270,11 @@ fixture and cover failure, deadlines, late cleanup, signal ownership and
 disabled preload. They do not qualify every database/framework, native runtime,
 customer collector or long-duration memory/CPU budget. A registry audit with
 findings remains a release gate even when unit tests pass.
+
+The manual publisher accepts only the first attempt of a newly dispatched
+workflow and binds the archive receipt to that exact run and workflow commit.
+Reruns are refused. After a failed attempt, inspect the registry before starting
+a fresh validation; an existing version is never replaced.
 
 For maintainers testing unpublished dependencies from the source checkout:
 

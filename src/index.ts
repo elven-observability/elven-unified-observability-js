@@ -2,9 +2,7 @@ import { destroy as destroyLogger, ILogger, init as initLogger, logger } from 'e
 import {
   initObservability,
   MetricFacade,
-  metrics as sdkMetrics,
   type ObservabilityHandle,
-  tracer as sdkTracer,
   TracerFacade,
 } from 'elven-opentelemetry-instrumentation-js';
 import {
@@ -21,10 +19,12 @@ import {
 // Re-export types
 export * from './types';
 
-// Public facades follow the wrapper handle, including disabled fallbacks.
+// Native ESM snapshots CommonJS named exports. Keep the exported object stable.
 export { logger } from 'elven-logs-interceptor';
-export let tracer: TracerFacade = sdkTracer;
-export let metrics: MetricFacade = sdkMetrics;
+export const tracer: TracerFacade = forwardingFacade(TracerFacade.prototype,
+  () => telemetryHandle?.tracer ?? (fallbackTracer ??= new TracerFacade('elven-unified-fallback')));
+export const metrics: MetricFacade = forwardingFacade(MetricFacade.prototype,
+  () => telemetryHandle?.metrics ?? (fallbackMetrics ??= new MetricFacade('elven-unified-fallback')));
 
 // Re-export type definitions for usage
 export { ILogger, MetricFacade, TracerFacade };
@@ -205,6 +205,47 @@ function assertCollectorTelemetryEndpoints(
   if (metricsEnabled && !collector?.endpoint && !collector?.metricsEndpoint) {
     throw new Error('Collector mode requires an endpoint for metrics');
   }
+  if (tracingEnabled) assertCollectorHeaderOwnership(config, 'traces');
+  if (metricsEnabled) assertCollectorHeaderOwnership(config, 'metrics');
+}
+
+function assertCollectorHeaderOwnership(
+  config: UnifiedObservabilityConfig,
+  signal: 'logs' | 'traces' | 'metrics'
+): void {
+  const upper = signal.toUpperCase();
+  if (!process.env.OTEL_EXPORTER_OTLP_HEADERS
+    && !process.env[`OTEL_EXPORTER_OTLP_${upper}_HEADERS`]) return;
+  const configured = config.collector?.[`${signal}Endpoint`]
+    || collectorSignalUrl(config.collector?.endpoint || '', signal, true);
+  const inherited = process.env[`OTEL_EXPORTER_OTLP_${upper}_ENDPOINT`]
+    || collectorSignalUrl(process.env.OTEL_EXPORTER_OTLP_ENDPOINT || 'http://localhost:4318', signal, false);
+  try {
+    const target = new URL(configured);
+    const ambient = new URL(inherited);
+    target.hash = '';
+    ambient.hash = '';
+    if (target.href === ambient.href) return;
+  } catch {
+    // Invalid destinations must not expose the original URL in diagnostics.
+  }
+  throw new Error(`Collector ${signal} destination conflicts with inherited OTLP headers; configure destination and headers in one owner`);
+}
+
+function collectorSignalUrl(base: string, signal: 'logs' | 'traces' | 'metrics', configured: boolean): string {
+  try {
+    if (!configured) {
+      // Upstream appends to the raw environment URL, including its query/slashes.
+      return new URL(`${base}${base.endsWith('/') ? '' : '/'}v1/${signal}`).href;
+    }
+    const url = new URL(base);
+    let pathname = url.pathname.replace(/\/+$/, '');
+    pathname = signal === 'logs' ? pathname.replace(/\/v1\/(logs|traces|metrics)$/, '') : pathname.replace(/\/v1\/(traces|metrics)$/, '');
+    url.pathname = `${pathname}/v1/${signal}`.replace(/\/+/g, '/');
+    return url.href;
+  } catch {
+    return '';
+  }
 }
 
 function buildLoggingConfig(
@@ -214,19 +255,18 @@ function buildLoggingConfig(
     return config.logging || { transport: { url: '', tenantId: '' } };
   }
 
-  const endpoint = config.collector?.logsEndpoint || config.collector?.endpoint || '';
+  assertCollectorHeaderOwnership(config, 'logs');
+  const endpoint = config.collector?.endpoint || config.collector?.logsEndpoint || '';
   return {
     ...config.logging,
     transport: {
       ...config.logging?.transport,
       type: 'otlp',
       url: endpoint,
+      logsUrl: config.collector?.logsEndpoint,
       authToken: undefined,
       tenantId: undefined,
-      headers: {
-        ...config.collector?.headers,
-        ...config.logging?.transport?.headers,
-      },
+      headers: { ...config.collector?.headers },
     },
   };
 }
@@ -307,6 +347,22 @@ export function getStatus(): UnifiedObservabilityStatus {
   return cloneStatus(currentStatus);
 }
 
+function forwardingFacade<T extends object>(prototype: object, delegate: () => T): T {
+  return new Proxy(Object.create(prototype) as T, {
+    get(_target, key) {
+      const current = delegate();
+      const value = Reflect.get(current, key);
+      if (typeof value !== 'function' || key === 'constructor') return value;
+      return (...args: unknown[]) => {
+        const active = delegate();
+        const method = Reflect.get(active, key);
+        if (typeof method !== 'function') throw new TypeError('Observability facade method is unavailable');
+        return Reflect.apply(method, active, args);
+      };
+    },
+  });
+}
+
 function createUnifiedHandle(): UnifiedObservabilityHandle {
   // API facades do not register another provider. Before an SDK is available,
   // OpenTelemetry supplies no-op implementations so fail-open stays usable.
@@ -314,12 +370,10 @@ function createUnifiedHandle(): UnifiedObservabilityHandle {
     fallbackTracer ??= new TracerFacade('elven-unified-fallback');
     fallbackMetrics ??= new MetricFacade('elven-unified-fallback');
   }
-  tracer = telemetryHandle?.tracer ?? fallbackTracer!;
-  metrics = telemetryHandle?.metrics ?? fallbackMetrics!;
   return {
     logger: activeLogger,
-    tracer,
-    metrics,
+    tracer: telemetryHandle?.tracer ?? tracer,
+    metrics: telemetryHandle?.metrics ?? metrics,
     forceFlush,
     shutdown,
     isStarted: isInitialized,

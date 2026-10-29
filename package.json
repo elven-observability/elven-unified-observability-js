@@ -49,12 +49,13 @@
   },
   "publishConfig": {
     "access": "public",
-    "provenance": true
+    "provenance": true,
+    "registry": "https://registry.npmjs.org/"
   },
   "dependencies": {
     "@opentelemetry/api": "^1.9.1",
-    "elven-opentelemetry-instrumentation-js": "^1.0.8",
-    "elven-logs-interceptor": "^1.1.0"
+    "elven-logs-interceptor": "^1.1.1",
+    "elven-opentelemetry-instrumentation-js": "^1.0.8"
   },
   "devDependencies": {
     "@types/node": "24.10.9",

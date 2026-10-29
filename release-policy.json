@@ -1,0 +1,9 @@
+{
+  "schema": 1,
+  "publication": "hold",
+  "openFindings": [
+    "Public SDK dependency advisory; validated replacement not published",
+    "SDK performance qualification not accepted",
+    "Public logger custom-regex CPU exhaustion; compatible fix not qualified"
+  ]
+}
